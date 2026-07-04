@@ -61,10 +61,14 @@ Public Class Form1
     Private tickTimer As System.Windows.Forms.Timer
     Private statePending As Boolean = False
 
-    ' === Move cooldown (gioi han toc do xoay/di chuyen) ===
+    ' === Move cooldown (gioi han toc do di chuyen, chay lien tuc khi giu phim) ===
     Private moveTimer As System.Windows.Forms.Timer
-    Private moveReady As Boolean = True
-    Private Const MOVE_COOLDOWN_MS As Integer = 220
+    Private Const MOVE_COOLDOWN_MS As Integer = 140
+
+    ' Trang thai phim dang giu (Up,Down,Left,Right) - thay the cho co che KeyDown/auto-repeat cua Windows
+    Private keyHeld(3) As Boolean
+    Private currentHeldDir As TankGame.Direction = TankGame.Direction.Up
+    Private anyDirHeld As Boolean = False
 
     ' === Pixel animation (truot tank vao o moi cho muot) ===
     Private Const RENDER_MS As Integer = 33
@@ -81,6 +85,7 @@ Public Class Form1
     Private spriteTankP0 As Image
     Private spriteTankP1 As Image
     Private spriteTankEnemy As Image
+    Private spriteTankBoss As Image
     Private spriteBrick As Image
     Private spriteSteel As Image
     Private spriteWater1 As Image
@@ -92,6 +97,24 @@ Public Class Form1
     Private spriteBullet As Image
     Private spritesLoaded As Boolean = False
     Private waterFrameToggle As Boolean = False
+
+    ' === Sprite power-up (rieng, khong lam hong bo sprite chinh neu chua co file) ===
+    Private spritePuStar As Image
+    Private spritePuHelmet As Image
+    Private spritePuGrenade As Image
+    Private spritePuShovel As Image
+    Private spritePuClock As Image
+    Private spriteShieldFx As Image
+    Private powerupSpritesLoaded As Boolean = False
+    Private shieldSpriteLoaded As Boolean = False
+
+    ' === Sprite tank theo cap do vu khi (Lv1/Lv2 sau khi an Sao) - rieng, tuy chon ===
+    Private spriteTankP0Lv1 As Image
+    Private spriteTankP0Lv2 As Image
+    Private spriteTankP1Lv1 As Image
+    Private spriteTankP1Lv2 As Image
+    Private tankLevelSpritesLoaded As Boolean = False
+    Private bossSpriteLoaded As Boolean = False
 
     Private Sub LoadSprites()
         Try
@@ -113,6 +136,46 @@ Public Class Form1
             ' Khong tim thay sprite -> fallback ve bang GDI+ hinh hoc nhu cu
             spritesLoaded = False
         End Try
+
+        ' Nap rieng sprite power-up - thieu file nao khong sao, DrawPowerUp/DrawShield se tu fallback
+        Try
+            Dim dir As String = IO.Path.Combine(Application.StartupPath, "sprites")
+            spritePuStar = Image.FromFile(IO.Path.Combine(dir, "powerup_star.png"))
+            spritePuHelmet = Image.FromFile(IO.Path.Combine(dir, "powerup_helmet.png"))
+            spritePuGrenade = Image.FromFile(IO.Path.Combine(dir, "powerup_grenade.png"))
+            spritePuShovel = Image.FromFile(IO.Path.Combine(dir, "powerup_shovel.png"))
+            spritePuClock = Image.FromFile(IO.Path.Combine(dir, "powerup_clock.png"))
+            powerupSpritesLoaded = True
+        Catch ex As Exception
+            powerupSpritesLoaded = False
+        End Try
+
+        Try
+            Dim dir As String = IO.Path.Combine(Application.StartupPath, "sprites")
+            spriteShieldFx = Image.FromFile(IO.Path.Combine(dir, "shield_fx.png"))
+            shieldSpriteLoaded = True
+        Catch ex As Exception
+            shieldSpriteLoaded = False
+        End Try
+
+        Try
+            Dim dir As String = IO.Path.Combine(Application.StartupPath, "sprites")
+            spriteTankP0Lv1 = Image.FromFile(IO.Path.Combine(dir, "tank_player0_lv1.png"))
+            spriteTankP0Lv2 = Image.FromFile(IO.Path.Combine(dir, "tank_player0_lv2.png"))
+            spriteTankP1Lv1 = Image.FromFile(IO.Path.Combine(dir, "tank_player1_lv1.png"))
+            spriteTankP1Lv2 = Image.FromFile(IO.Path.Combine(dir, "tank_player1_lv2.png"))
+            tankLevelSpritesLoaded = True
+        Catch ex As Exception
+            tankLevelSpritesLoaded = False
+        End Try
+
+        Try
+            Dim dir As String = IO.Path.Combine(Application.StartupPath, "sprites")
+            spriteTankBoss = Image.FromFile(IO.Path.Combine(dir, "tank_boss.png"))
+            bossSpriteLoaded = True
+        Catch ex As Exception
+            bossSpriteLoaded = False
+        End Try
     End Sub
 
     Public Sub New()
@@ -128,6 +191,7 @@ Public Class Form1
         Me.BackColor = Color.FromArgb(20, 20, 20)
         Me.KeyPreview = True
         AddHandler Me.KeyDown, AddressOf Form1_KeyDown
+        AddHandler Me.KeyUp, AddressOf Form1_KeyUp
 
         tickTimer = New System.Windows.Forms.Timer()
         tickTimer.Interval = TICK_MS
@@ -139,10 +203,7 @@ Public Class Form1
 
         moveTimer = New System.Windows.Forms.Timer()
         moveTimer.Interval = MOVE_COOLDOWN_MS
-        AddHandler moveTimer.Tick, Sub(s As Object, ev As EventArgs)
-            moveReady = True
-            moveTimer.Stop()
-        End Sub
+        AddHandler moveTimer.Tick, AddressOf MoveTimer_Tick
 
         renderTimer = New System.Windows.Forms.Timer()
         renderTimer.Interval = RENDER_MS
@@ -227,8 +288,9 @@ Public Class Form1
         game.IsPvAI = True
         game.StartPvAIWave()
         statePending = False
-        moveReady = True
+        ClearHeldKeys()
         moveTimer.Stop()
+        moveTimer.Start()
         InitPixelPos()
         ShowGamePanel()
         AppendLog(String.Format("PvAI: Bao ve can cu, tieu diet {0} xe dich de thang!", TankGame.ENEMY_TOTAL))
@@ -457,16 +519,33 @@ Public Class Form1
             Next x
         Next y
 
+        ' Lop 1b: power-up dang nam tren san (sao/mu/luu dan/xeng/dong ho)
+        Dim pu As Integer
+        For pu = 0 To game.PowerUps.Count - 1
+            DrawPowerUp(g, game.PowerUps(pu))
+        Next pu
+
         ' Lop 2: tank (duoi co)
-        If game.PlayerAlive(0) Then DrawTank(g, playerPX(0), playerPY(0), game.PlayerDir(0), 0)
-        If game.PlayerAlive(1) Then DrawTank(g, playerPX(1), playerPY(1), game.PlayerDir(1), 1)
+        If game.PlayerAlive(0) Then
+            DrawTank(g, playerPX(0), playerPY(0), game.PlayerDir(0), 0)
+            If game.PlayerShieldTicks(0) > 0 Then DrawShield(g, playerPX(0), playerPY(0))
+        End If
+        If game.PlayerAlive(1) Then
+            DrawTank(g, playerPX(1), playerPY(1), game.PlayerDir(1), 1)
+            If game.PlayerShieldTicks(1) > 0 Then DrawShield(g, playerPX(1), playerPY(1))
+        End If
 
         Dim i As Integer
         For i = 0 To game.Enemies.Count - 1
             If game.Enemies(i).Alive Then
                 Dim epx As Single = If(enemyPX IsNot Nothing AndAlso i < enemyPX.Length, enemyPX(i), CSng(game.Enemies(i).X * CELL_SIZE))
                 Dim epy As Single = If(enemyPY IsNot Nothing AndAlso i < enemyPY.Length, enemyPY(i), CSng(game.Enemies(i).Y * CELL_SIZE))
-                DrawTank(g, epx, epy, game.Enemies(i).Dir, -1)
+                Dim tier As Integer = game.Enemies(i).BossTier
+                If tier = 2 Then
+                    DrawFinalBossGlow(g, epx, epy)
+                End If
+                DrawTank(g, epx, epy, game.Enemies(i).Dir, If(tier > 0, -2, -1))
+                If tier > 0 Then DrawBossHpBar(g, epx, epy, game.Enemies(i).HP, tier)
             End If
         Next i
 
@@ -481,6 +560,91 @@ Public Class Form1
                 If game.Map(x, y) = TankGame.CellType.Grass Then DrawCell(g, x, y)
             Next x
         Next y
+    End Sub
+
+    ' Ve vach mau cua Boss/Trum cuoi (o tren dau xe, so o = so mau con lai)
+    Private Sub DrawBossHpBar(g As Graphics, px As Single, py As Single, hp As Integer, tier As Integer)
+        Dim maxHp As Integer = If(tier = 2, TankGame.FINAL_BOSS_HP, TankGame.BOSS_HP)
+        Dim fillClr As Color = If(tier = 2, Color.FromArgb(230, 170, 40, 220), Color.FromArgb(230, 220, 40, 40))
+        Dim barW As Single = CELL_SIZE - 6.0!
+        Dim segW As Single = barW / maxHp
+        Dim barY As Single = py - 7.0!
+        Dim k As Integer
+        For k = 0 To maxHp - 1
+            Dim segX As Single = px + 3.0! + k * segW
+            Dim clr As Color = If(k < hp, fillClr, Color.FromArgb(150, 60, 60, 60))
+            Using br As New SolidBrush(clr)
+                g.FillRectangle(br, segX, barY, segW - 1.5!, 4.0!)
+            End Using
+        Next k
+    End Sub
+
+    ' Ve hao quang tim-do nhap nhay quanh Trum cuoi de phan biet voi Boss thuong
+    Private Sub DrawFinalBossGlow(g As Graphics, px As Single, py As Single)
+        Dim pulse As Single = 4.0! + 2.0! * CSng(Math.Sin(Environment.TickCount / 150.0))
+        Dim r As New RectangleF(px - pulse, py - pulse, CELL_SIZE + pulse * 2.0!, CELL_SIZE + pulse * 2.0!)
+        Using p As New Pen(Color.FromArgb(180, 200, 30, 210), 3.0!)
+            g.DrawEllipse(p, r)
+        End Using
+    End Sub
+
+    ' Ve khien bat tu (Mu bao ho) quanh tank
+    Private Sub DrawShield(g As Graphics, px As Single, py As Single)
+        If shieldSpriteLoaded Then
+            g.DrawImage(spriteShieldFx, px - 2.0!, py - 2.0!, CSng(CELL_SIZE + 4), CSng(CELL_SIZE + 4))
+            Return
+        End If
+        Dim r As New Rectangle(CInt(px) - 2, CInt(py) - 2, CELL_SIZE + 4, CELL_SIZE + 4)
+        Using p As New Pen(Color.FromArgb(200, 255, 230, 60), 2.5!)
+            g.DrawEllipse(p, r)
+        End Using
+    End Sub
+
+    ' Ve hop power-up (dung sprite PNG neu co, khong thi fallback ve hinh hoc + chu cai dai dien)
+    Private Sub DrawPowerUp(g As Graphics, item As TankGame.PowerUpItem)
+        Dim rx As Integer = item.X * CELL_SIZE
+        Dim ry As Integer = item.Y * CELL_SIZE
+        If item.TTL < 30 AndAlso (item.TTL \ 6) Mod 2 = 0 Then Return   ' nhap nhay canh bao sap het han
+
+        If powerupSpritesLoaded Then
+            Dim spr As Image = Nothing
+            Select Case item.Kind
+                Case TankGame.PowerUpType.Star : spr = spritePuStar
+                Case TankGame.PowerUpType.Helmet : spr = spritePuHelmet
+                Case TankGame.PowerUpType.Grenade : spr = spritePuGrenade
+                Case TankGame.PowerUpType.Shovel : spr = spritePuShovel
+                Case TankGame.PowerUpType.Clock : spr = spritePuClock
+            End Select
+            If spr IsNot Nothing Then
+                g.DrawImage(spr, rx, ry, CELL_SIZE, CELL_SIZE)
+                Return
+            End If
+        End If
+
+        Dim fillClr As Color
+        Dim letter As String
+        Select Case item.Kind
+            Case TankGame.PowerUpType.Star : fillClr = Color.Gold : letter = "S"
+            Case TankGame.PowerUpType.Helmet : fillClr = Color.DeepSkyBlue : letter = "M"
+            Case TankGame.PowerUpType.Grenade : fillClr = Color.OrangeRed : letter = "L"
+            Case TankGame.PowerUpType.Shovel : fillClr = Color.SaddleBrown : letter = "X"
+            Case TankGame.PowerUpType.Clock : fillClr = Color.MediumPurple : letter = "D"
+            Case Else : fillClr = Color.White : letter = "?"
+        End Select
+
+        Dim r As New Rectangle(rx + 3, ry + 3, CELL_SIZE - 6, CELL_SIZE - 6)
+        Using bg As New SolidBrush(Color.FromArgb(230, 20, 20, 20))
+            g.FillRectangle(bg, r)
+        End Using
+        Using p As New Pen(fillClr, 2.0!)
+            g.DrawRectangle(p, r)
+        End Using
+        Using f As New Font("Segoe UI", 12.0!, FontStyle.Bold)
+        Using br As New SolidBrush(fillClr)
+            Dim sz As SizeF = g.MeasureString(letter, f)
+            g.DrawString(letter, f, br, rx + CELL_SIZE / 2.0! - sz.Width / 2.0!, ry + CELL_SIZE / 2.0! - sz.Height / 2.0!)
+        End Using
+        End Using
     End Sub
 
     Private Sub DrawCell(g As Graphics, x As Integer, y As Integer)
@@ -600,9 +764,28 @@ Public Class Form1
         If spritesLoaded Then
             Dim spr As Image
             Select Case player
-                Case 0 : spr = spriteTankP0
-                Case 1 : spr = spriteTankP1
-                Case Else : spr = spriteTankEnemy
+                Case 0
+                    Dim lvl As Integer = If(game IsNot Nothing, game.PlayerWeaponLevel(0), 0)
+                    If tankLevelSpritesLoaded AndAlso lvl = 1 Then
+                        spr = spriteTankP0Lv1
+                    ElseIf tankLevelSpritesLoaded AndAlso lvl >= 2 Then
+                        spr = spriteTankP0Lv2
+                    Else
+                        spr = spriteTankP0
+                    End If
+                Case 1
+                    Dim lvl As Integer = If(game IsNot Nothing, game.PlayerWeaponLevel(1), 0)
+                    If tankLevelSpritesLoaded AndAlso lvl = 1 Then
+                        spr = spriteTankP1Lv1
+                    ElseIf tankLevelSpritesLoaded AndAlso lvl >= 2 Then
+                        spr = spriteTankP1Lv2
+                    Else
+                        spr = spriteTankP1
+                    End If
+                Case -2
+                    spr = If(bossSpriteLoaded, spriteTankBoss, spriteTankEnemy)
+                Case Else
+                    spr = spriteTankEnemy
             End Select
 
             Dim cx As Single = px + CELL_SIZE / 2.0!
@@ -628,7 +811,8 @@ Public Class Form1
         Select Case player
             Case 0 : bodyClr = Color.DodgerBlue
             Case 1 : bodyClr = Color.OrangeRed
-            Case Else : bodyClr = Color.FromArgb(200, 60, 60)   ' dich AI
+            Case -2 : bodyClr = Color.FromArgb(200, 160, 20)   ' Boss - vang dong, noi bat hon dich thuong
+            Case Else : bodyClr = Color.FromArgb(200, 60, 60)   ' dich AI thuong
         End Select
         Dim darkClr As Color = Color.FromArgb(CInt(bodyClr.R * 0.5), CInt(bodyClr.G * 0.5), CInt(bodyClr.B * 0.5))
 
@@ -700,45 +884,80 @@ Public Class Form1
         If game Is Nothing OrElse localPlayer < 0 Then Return
         If txtChatInput IsNot Nothing AndAlso txtChatInput.Focused Then Return
 
-        Dim dir As TankGame.Direction = TankGame.Direction.Up
-        Dim hasDir As Boolean = False
-        Dim shoot As Boolean = False
-
         Select Case e.KeyCode
-            Case Keys.W, Keys.Up : dir = TankGame.Direction.Up : hasDir = True
-            Case Keys.S, Keys.Down : dir = TankGame.Direction.Down : hasDir = True
-            Case Keys.A, Keys.Left : dir = TankGame.Direction.Left : hasDir = True
-            Case Keys.D, Keys.Right : dir = TankGame.Direction.Right : hasDir = True
-            Case Keys.Space : shoot = True
-        End Select
-
-        If shoot Then
-            If isHost Then
-                If game.TryShoot(localPlayer) Then
-                    boardPanel.Invalidate()
-                    statePending = True
+            Case Keys.W, Keys.Up
+                keyHeld(0) = True : currentHeldDir = TankGame.Direction.Up : anyDirHeld = True
+                e.Handled = True
+            Case Keys.S, Keys.Down
+                keyHeld(1) = True : currentHeldDir = TankGame.Direction.Down : anyDirHeld = True
+                e.Handled = True
+            Case Keys.A, Keys.Left
+                keyHeld(2) = True : currentHeldDir = TankGame.Direction.Left : anyDirHeld = True
+                e.Handled = True
+            Case Keys.D, Keys.Right
+                keyHeld(3) = True : currentHeldDir = TankGame.Direction.Right : anyDirHeld = True
+                e.Handled = True
+            Case Keys.Space
+                If isHost Then
+                    If game.TryShoot(localPlayer) Then
+                        boardPanel.Invalidate()
+                        statePending = True
+                    End If
+                Else
+                    peer.SendLine("SHOOT:" & localPlayer.ToString())
                 End If
-            Else
-                peer.SendLine("SHOOT:" & localPlayer.ToString())
-            End If
-            e.Handled = True
+                e.Handled = True
+        End Select
+    End Sub
+
+    Private Sub Form1_KeyUp(sender As Object, e As KeyEventArgs)
+        Dim idx As Integer = -1
+        Select Case e.KeyCode
+            Case Keys.W, Keys.Up : idx = 0
+            Case Keys.S, Keys.Down : idx = 1
+            Case Keys.A, Keys.Left : idx = 2
+            Case Keys.D, Keys.Right : idx = 3
+        End Select
+        If idx < 0 Then Return
+
+        keyHeld(idx) = False
+
+        If Not (keyHeld(0) OrElse keyHeld(1) OrElse keyHeld(2) OrElse keyHeld(3)) Then
+            anyDirHeld = False
             Return
         End If
 
-        If hasDir Then
-            If Not moveReady Then Return
-            moveReady = False
-            moveTimer.Start()
-
-            If isHost Then
-                If game.TryMove(localPlayer, dir) Then
-                    boardPanel.Invalidate()
+        ' Neu phim vua nha la huong dang di chuyen, chuyen sang phim khac dang giu (neu co)
+        If CInt(currentHeldDir) = idx Then
+            Dim k As Integer
+            For k = 0 To 3
+                If keyHeld(k) Then
+                    currentHeldDir = CType(k, TankGame.Direction)
+                    Exit For
                 End If
-                statePending = True
-            Else
-                peer.SendLine("MOVE:" & localPlayer.ToString() & ":" & CInt(dir).ToString())
+            Next k
+        End If
+    End Sub
+
+    Private Sub ClearHeldKeys()
+        keyHeld(0) = False : keyHeld(1) = False : keyHeld(2) = False : keyHeld(3) = False
+        anyDirHeld = False
+    End Sub
+
+    Private Sub MoveTimer_Tick(sender As Object, e As EventArgs)
+        If game Is Nothing OrElse localPlayer < 0 Then Return
+        If Not anyDirHeld Then Return
+        If game.GameOver Then Return
+        If txtChatInput IsNot Nothing AndAlso txtChatInput.Focused Then Return
+
+        Dim dir As TankGame.Direction = currentHeldDir
+        If isHost Then
+            If game.TryMove(localPlayer, dir) Then
+                boardPanel.Invalidate()
             End If
-            e.Handled = True
+            statePending = True
+        Else
+            peer.SendLine("MOVE:" & localPlayer.ToString() & ":" & CInt(dir).ToString())
         End If
     End Sub
 
@@ -853,6 +1072,8 @@ Public Class Form1
             matchTimer.Stop()
             tickTimer.Stop()
             renderTimer.Stop()
+            moveTimer.Stop()
+            ClearHeldKeys()
             Dim result As String
             If isPvAIMode Then
                 result = String.Format("Het gio! Da tieu diet {0}/{1} xe dich. Thua!", game.EnemiesKilled, TankGame.ENEMY_TOTAL)
@@ -892,6 +1113,8 @@ Public Class Form1
         If game.GameOver Then
             tickTimer.Stop()
             renderTimer.Stop()
+            moveTimer.Stop()
+            ClearHeldKeys()
             AppendLog(game.LastLog)
             If Not isPvAIMode Then BroadcastState()
             Me.BeginInvoke(New Action(Sub()
@@ -938,6 +1161,8 @@ Public Class Form1
 
     Private Sub Peer_Disconnected()
         tickTimer.Stop()
+        moveTimer.Stop()
+        ClearHeldKeys()
         Me.BeginInvoke(New Action(Sub()
             If game IsNot Nothing AndAlso game.GameOver Then Return
             MessageBox.Show("Mat ket noi.")
@@ -964,6 +1189,9 @@ Public Class Form1
                 statePending = False
                 InitPixelPos()
                 BroadcastState()
+                ClearHeldKeys()
+                moveTimer.Stop()
+                moveTimer.Start()
                 tickTimer.Start()
                 renderTimer.Start()
                 ResetMatchTimer()
@@ -976,6 +1204,9 @@ Public Class Form1
             If Not pnlGame.Visible Then
                 ShowGamePanel()
                 InitPixelPos()
+                ClearHeldKeys()
+                moveTimer.Stop()
+                moveTimer.Start()
                 renderTimer.Start()
                 ResetMatchTimer()
             End If
@@ -1051,8 +1282,9 @@ Public Class Form1
             game.StartPvAIWave()
         End If
         statePending = False
-        moveReady = True
+        ClearHeldKeys()
         moveTimer.Stop()
+        moveTimer.Start()
         InitPixelPos()
         tickTimer.Start()
         renderTimer.Start()
@@ -1070,7 +1302,8 @@ Public Class Form1
             Dim alive0 As String = If(game.PlayerAlive(0), "Song", "Chet")
             Dim baseInfo As String = If(game.Bases(0).Alive, "Can cu: An toan", "Can cu: BI PHA")
             Dim killInfo As String = If(isPvAIMode, String.Format("  Diet: {0}/{1}", game.EnemiesKilled, TankGame.ENEMY_TOTAL), "")
-            stats0.Text = String.Format("{0}  {1}{2}", alive0, baseInfo, killInfo)
+            Dim buffInfo As String = BuildBuffInfo(0)
+            stats0.Text = String.Format("{0}  {1}{2}{3}", alive0, baseInfo, killInfo, buffInfo)
             stats0.ForeColor = If(game.PlayerAlive(0), Color.LightGray, Color.Gray)
         End If
         If Not isPvAIMode Then
@@ -1078,11 +1311,23 @@ Public Class Form1
             If stats1 IsNot Nothing Then
                 Dim alive1 As String = If(game.PlayerAlive(1), "Song", "Chet")
                 Dim baseInfo1 As String = If(game.Bases(1).Alive, "Can cu: An toan", "Can cu: BI PHA")
-                stats1.Text = String.Format("{0}  {1}", alive1, baseInfo1)
+                Dim buffInfo1 As String = BuildBuffInfo(1)
+                stats1.Text = String.Format("{0}  {1}{2}", alive1, baseInfo1, buffInfo1)
                 stats1.ForeColor = If(game.PlayerAlive(1), Color.LightGray, Color.Gray)
             End If
         End If
     End Sub
+
+    Private Function BuildBuffInfo(player As Integer) As String
+        Dim s As String = ""
+        If game.PlayerWeaponLevel(player) > 0 Then
+            s &= String.Format("  [Dan Lv{0}]", game.PlayerWeaponLevel(player))
+        End If
+        If game.PlayerShieldTicks(player) > 0 Then
+            s &= "  [Khien]"
+        End If
+        Return s
+    End Function
 
     Private Sub AppendLog(msg As String)
         lstLog.Items.Add(msg)

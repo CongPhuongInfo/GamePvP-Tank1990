@@ -13,6 +13,17 @@ Public Class TankGame
     Public Const ENEMY_SPAWN_COOLDOWN As Integer = 45  ' so tick giua 2 lan spawn dich (45*120ms = ~5.4s)
     Public Const ENEMY_SHOOT_CHANCE As Integer = 18    ' % co hoi ban moi luot hanh dong
     Public Const ENEMY_SHOOT_COOLDOWN As Integer = 12  ' so tick toi thieu giua 2 lan ban cua 1 xe dich
+    Public Const BOSS_EVERY_N_KILLS As Integer = 5     ' cu moi 5 xe dich se co 1 con la Boss
+    Public Const BOSS_HP As Integer = 3                ' so mau cua Boss giua wave
+    Public Const FINAL_BOSS_HP As Integer = 5          ' so mau cua Trum cuoi (xe dich cuoi cung)
+
+    ' --- Power-up (kieu Battle City co dien) ---
+    Public Const POWERUP_DROP_CHANCE As Integer = 30   ' % co hoi rot do khi ha 1 xe dich
+    Public Const POWERUP_TTL As Integer = 150          ' so tick do ton tai truoc khi bien mat (~18s)
+    Public Const POWERUP_MAX_WEAPON_LEVEL As Integer = 2
+    Public Const SHIELD_DURATION_TICKS As Integer = 80   ' Mu bao ho: bat tu (~9.6s)
+    Public Const SHOVEL_DURATION_TICKS As Integer = 200  ' Xeng: boc thep quanh can cu (~24s)
+    Public Const CLOCK_FREEZE_TICKS As Integer = 60      ' Dong ho: dong bang dich (~7.2s)
 
     Public Enum CellType As Byte
         Empty = 0
@@ -31,6 +42,14 @@ Public Class TankGame
         Right = 3
     End Enum
 
+    Public Enum PowerUpType As Byte
+        Star = 0     ' Nang cap suc manh dan
+        Helmet = 1   ' Bat tu tam thoi
+        Grenade = 2  ' Tieu diet toan bo xe dich hien co tren san
+        Shovel = 3   ' Boc thep quanh can cu tam thoi
+        Clock = 4    ' Dong bang toan bo xe dich tam thoi
+    End Enum
+
     Public Structure BulletInfo
         Public X As Integer
         Public Y As Integer
@@ -47,12 +66,21 @@ Public Class TankGame
         Public BulletActive As Boolean
         Public ActionCooldown As Integer
         Public ShootCooldown As Integer
+        Public BossTier As Integer   ' 0 = thuong, 1 = Boss giua wave, 2 = Trum cuoi (xe dich cuoi cung)
+        Public HP As Integer
     End Structure
 
     Public Structure BaseInfo
         Public X As Integer
         Public Y As Integer
         Public Alive As Boolean
+    End Structure
+
+    Public Structure PowerUpItem
+        Public X As Integer
+        Public Y As Integer
+        Public Kind As PowerUpType
+        Public TTL As Integer   ' so tick con lai truoc khi bien mat neu khong ai nhat
     End Structure
 
     ' --- Ban do ---
@@ -64,12 +92,18 @@ Public Class TankGame
     Public PlayerY(1) As Integer
     Public PlayerDir(1) As Direction
     Public PlayerAlive(1) As Boolean
-    Public PlayerBulletActive(1) As Boolean
+    Public PlayerBulletCount(1) As Integer   ' so dan dang bay tren san cua moi nguoi choi
+    Public PlayerWeaponLevel(1) As Integer   ' 0 = mac dinh, 1 = pha duoc thep, 2 = ban 2 vien cung luc
+    Public PlayerShieldTicks(1) As Integer   ' > 0 = dang bat tu (Mu bao ho)
 
     ' --- Doi tuong ---
     Public Bullets As New List(Of BulletInfo)()
     Public Enemies As New List(Of EnemyTank)()
     Public Bases(1) As BaseInfo   ' Bases(0) = can cu Player1/PvAI, Bases(1) = can cu Player2 (chi dung trong PvP)
+    Public PowerUps As New List(Of PowerUpItem)()
+    Public BaseShieldTicksLeft As Integer     ' > 0 = gach quanh can cu dang duoc Xeng boc thep
+    Public EnemyFreezeTicks As Integer        ' > 0 = dich dang bi Dong ho dong bang
+    Private baseShieldCells As New List(Of Point2D)()
 
     ' --- Trang thai game ---
     Public GameOver As Boolean
@@ -162,8 +196,16 @@ Public Class TankGame
         PlayerAlive(1) = True
         Map(PlayerX(0), PlayerY(0)) = CellType.Empty
         Map(PlayerX(1), PlayerY(1)) = CellType.Empty
-        PlayerBulletActive(0) = False
-        PlayerBulletActive(1) = False
+        PlayerBulletCount(0) = 0
+        PlayerBulletCount(1) = 0
+        PlayerWeaponLevel(0) = 0
+        PlayerWeaponLevel(1) = 0
+        PlayerShieldTicks(0) = 0
+        PlayerShieldTicks(1) = 0
+        PowerUps.Clear()
+        BaseShieldTicksLeft = 0
+        EnemyFreezeTicks = 0
+        baseShieldCells.Clear()
 
         Bullets.Clear()
         Enemies.Clear()
@@ -195,6 +237,7 @@ Public Class TankGame
         EnemiesSpawned = 0
         EnemiesKilled = 0
         enemySpawnTimer = 5
+        PlayerAlive(1) = False   ' PvAI khong co Player 2 - an/loai bo xe "ma" o goc tren-phai
         SpawnOneEnemy()
     End Sub
 
@@ -208,6 +251,19 @@ Public Class TankGame
         Dim e As New EnemyTank()
         e.X = sp.X : e.Y = sp.Y : e.Dir = Direction.Down
         e.Alive = True : e.BulletActive = False : e.ActionCooldown = 3 : e.ShootCooldown = 6
+
+        Dim spawnIndex As Integer = EnemiesSpawned + 1   ' thu tu xe dich nay (1-based)
+        If spawnIndex = ENEMY_TOTAL Then
+            e.BossTier = 2   ' xe dich cuoi cung = Trum cuoi
+            e.HP = FINAL_BOSS_HP
+        ElseIf spawnIndex Mod BOSS_EVERY_N_KILLS = 0 Then
+            e.BossTier = 1   ' Boss giua wave
+            e.HP = BOSS_HP
+        Else
+            e.BossTier = 0
+            e.HP = 1
+        End If
+
         Enemies.Add(e)
         EnemiesSpawned += 1
     End Sub
@@ -235,7 +291,9 @@ Public Class TankGame
     Public Function TryShoot(player As Integer) As Boolean
         If GameOver Then Return False
         If Not PlayerAlive(player) Then Return False
-        If PlayerBulletActive(player) Then Return False
+
+        Dim maxBullets As Integer = If(PlayerWeaponLevel(player) >= POWERUP_MAX_WEAPON_LEVEL, 2, 1)
+        If PlayerBulletCount(player) >= maxBullets Then Return False
 
         Dim b As New BulletInfo()
         b.X = PlayerX(player) + DX(CInt(PlayerDir(player)))
@@ -248,7 +306,7 @@ Public Class TankGame
         If Map(b.X, b.Y) = CellType.Steel OrElse Map(b.X, b.Y) = CellType.Water Then Return False
 
         Bullets.Add(b)
-        PlayerBulletActive(player) = True
+        PlayerBulletCount(player) += 1
         LastLog = String.Format("Player {0} khai hoa!", player + 1)
         Return True
     End Function
@@ -300,6 +358,8 @@ Public Class TankGame
 
         MoveBullets()
         ResolveBulletCollisions()
+        TickPowerUps()
+        TickShieldsAndTimers()
 
         If IsPvAI Then
             TickEnemyAI()
@@ -323,6 +383,11 @@ Public Class TankGame
 
             Dim cell As CellType = Map(nx, ny)
             If cell = CellType.Steel Then
+                Dim isBoundary As Boolean = (nx = 0 OrElse nx = COLS - 1 OrElse ny = 0 OrElse ny = ROWS - 1)
+                If Not isBoundary AndAlso b.Owner >= 0 AndAlso PlayerWeaponLevel(b.Owner) >= 1 Then
+                    Map(nx, ny) = CellType.Empty
+                    LastLog = "Pha vo tuong thep!"
+                End If
                 RemoveBullet(i)
                 Continue Do
             ElseIf cell = CellType.Brick Then
@@ -348,7 +413,7 @@ Public Class TankGame
     Private Sub RemoveBullet(idx As Integer)
         Dim b As BulletInfo = Bullets(idx)
         If b.Owner >= 0 Then
-            PlayerBulletActive(b.Owner) = False
+            PlayerBulletCount(b.Owner) = Math.Max(0, PlayerBulletCount(b.Owner) - 1)
         ElseIf b.EnemyIndex >= 0 AndAlso b.EnemyIndex < Enemies.Count Then
             Dim e As EnemyTank = Enemies(b.EnemyIndex)
             e.BulletActive = False
@@ -369,8 +434,12 @@ Public Class TankGame
                 If Not PlayerAlive(p) Then Continue For
                 If b.Owner = p Then Continue For   ' khong tu ban trung minh
                 If PlayerX(p) = b.X AndAlso PlayerY(p) = b.Y Then
-                    PlayerAlive(p) = False
-                    LastLog = String.Format("Player {0} bi ban ha!", p + 1)
+                    If PlayerShieldTicks(p) > 0 Then
+                        LastLog = String.Format("Player {0} duoc Mu bao ho do dan!", p + 1)
+                    Else
+                        PlayerAlive(p) = False
+                        LastLog = String.Format("Player {0} bi ban ha!", p + 1)
+                    End If
                     hit = True
                 End If
             Next p
@@ -382,11 +451,28 @@ Public Class TankGame
                     If b.EnemyIndex = ei Then Continue For
                     If Enemies(ei).X = b.X AndAlso Enemies(ei).Y = b.Y Then
                         Dim e As EnemyTank = Enemies(ei)
-                        e.Alive = False
-                        Enemies(ei) = e
-                        EnemiesKilled += 1
-                        LastLog = "Tieu diet 1 xe dich!"
+                        e.HP -= 1
                         hit = True
+                        If e.HP <= 0 Then
+                            e.Alive = False
+                            Enemies(ei) = e
+                            EnemiesKilled += 1
+                            If e.BossTier = 2 Then
+                                LastLog = "Ha guc TRUM CUOI!"
+                            ElseIf e.BossTier = 1 Then
+                                LastLog = "Ha guc BOSS!"
+                            Else
+                                LastLog = "Tieu diet 1 xe dich!"
+                            End If
+                            If e.BossTier > 0 OrElse rng.Next(100) < POWERUP_DROP_CHANCE Then
+                                SpawnPowerUp(e.X, e.Y)
+                            End If
+                        Else
+                            Enemies(ei) = e
+                            LastLog = If(e.BossTier = 2,
+                                String.Format("TRUM CUOI trung dan! Con {0} mau!", e.HP),
+                                String.Format("BOSS trung dan! Con {0} mau!", e.HP))
+                        End If
                     End If
                 Next ei
             End If
@@ -417,9 +503,126 @@ Public Class TankGame
     End Sub
 
     ' ============================================================
+    '  POWER-UP (kieu Battle City co dien)
+    ' ============================================================
+    Private Sub SpawnPowerUp(x As Integer, y As Integer)
+        Dim item As New PowerUpItem()
+        item.X = x
+        item.Y = y
+        item.Kind = CType(rng.Next(5), PowerUpType)
+        item.TTL = POWERUP_TTL
+        PowerUps.Add(item)
+    End Sub
+
+    Private Sub TickPowerUps()
+        Dim i As Integer = 0
+        Do While i < PowerUps.Count
+            Dim item As PowerUpItem = PowerUps(i)
+            Dim collected As Boolean = False
+
+            Dim p As Integer
+            For p = 0 To 1
+                If PlayerAlive(p) AndAlso PlayerX(p) = item.X AndAlso PlayerY(p) = item.Y Then
+                    ApplyPowerUp(p, item.Kind)
+                    collected = True
+                    Exit For
+                End If
+            Next p
+
+            If collected Then
+                PowerUps.RemoveAt(i)
+                Continue Do
+            End If
+
+            item.TTL -= 1
+            If item.TTL <= 0 Then
+                PowerUps.RemoveAt(i)
+                Continue Do
+            End If
+            PowerUps(i) = item
+            i += 1
+        Loop
+    End Sub
+
+    Private Sub ApplyPowerUp(player As Integer, kind As PowerUpType)
+        Select Case kind
+            Case PowerUpType.Star
+                If PlayerWeaponLevel(player) < POWERUP_MAX_WEAPON_LEVEL Then
+                    PlayerWeaponLevel(player) += 1
+                End If
+                LastLog = String.Format("Player {0} nhat SAO! Nang cap suc manh dan!", player + 1)
+
+            Case PowerUpType.Helmet
+                PlayerShieldTicks(player) = SHIELD_DURATION_TICKS
+                LastLog = String.Format("Player {0} nhat MU BAO HO! Bat tu tam thoi!", player + 1)
+
+            Case PowerUpType.Grenade
+                Dim gi As Integer
+                For gi = 0 To Enemies.Count - 1
+                    If Enemies(gi).Alive Then
+                        Dim ge As EnemyTank = Enemies(gi)
+                        ge.Alive = False
+                        Enemies(gi) = ge
+                        EnemiesKilled += 1
+                    End If
+                Next gi
+                LastLog = String.Format("Player {0} nhat LUU DAN! Tieu diet toan bo xe dich tren san!", player + 1)
+
+            Case PowerUpType.Shovel
+                ActivateBaseShield()
+                LastLog = String.Format("Player {0} nhat XENG! Can cu duoc boc thep tam thoi!", player + 1)
+
+            Case PowerUpType.Clock
+                EnemyFreezeTicks = CLOCK_FREEZE_TICKS
+                LastLog = String.Format("Player {0} nhat DONG HO! Xe dich bi dong bang!", player + 1)
+        End Select
+    End Sub
+
+    Private Sub ActivateBaseShield()
+        baseShieldCells.Clear()
+        Dim bx As Integer = Bases(0).X
+        Dim by As Integer = Bases(0).Y
+        Dim ox As Integer, oy As Integer
+        For oy = -1 To 1
+            For ox = -1 To 1
+                If ox = 0 AndAlso oy = 0 Then Continue For
+                Dim nx As Integer = bx + ox
+                Dim ny As Integer = by + oy
+                If nx < 1 OrElse nx >= COLS - 1 OrElse ny < 1 OrElse ny >= ROWS - 1 Then Continue For
+                If Map(nx, ny) = CellType.Brick Then
+                    Map(nx, ny) = CellType.Steel
+                    baseShieldCells.Add(New Point2D(nx, ny))
+                End If
+            Next ox
+        Next oy
+        BaseShieldTicksLeft = SHOVEL_DURATION_TICKS
+    End Sub
+
+    Private Sub TickShieldsAndTimers()
+        If PlayerShieldTicks(0) > 0 Then PlayerShieldTicks(0) -= 1
+        If PlayerShieldTicks(1) > 0 Then PlayerShieldTicks(1) -= 1
+
+        If EnemyFreezeTicks > 0 Then EnemyFreezeTicks -= 1
+
+        If BaseShieldTicksLeft > 0 Then
+            BaseShieldTicksLeft -= 1
+            If BaseShieldTicksLeft = 0 Then
+                Dim ci As Integer
+                For ci = 0 To baseShieldCells.Count - 1
+                    Dim pc As Point2D = baseShieldCells(ci)
+                    If Map(pc.X, pc.Y) = CellType.Steel Then Map(pc.X, pc.Y) = CellType.Brick
+                Next ci
+                baseShieldCells.Clear()
+            End If
+        End If
+    End Sub
+
+    ' ============================================================
     '  AI DICH (PvAI)
     ' ============================================================
     Private Sub TickEnemyAI()
+        If EnemyFreezeTicks > 0 Then Return   ' Dong ho: dich bi dong bang, khong hanh dong
+
         Dim i As Integer
         For i = 0 To Enemies.Count - 1
             If Not Enemies(i).Alive Then Continue For
@@ -598,7 +801,9 @@ Public Class TankGame
             sb.Append(e.X.ToString()) : sb.Append(",")
             sb.Append(e.Y.ToString()) : sb.Append(",")
             sb.Append(CInt(e.Dir).ToString()) : sb.Append(",")
-            sb.Append(If(e.Alive, "1", "0"))
+            sb.Append(If(e.Alive, "1", "0")) : sb.Append(",")
+            sb.Append(e.BossTier.ToString()) : sb.Append(",")
+            sb.Append(e.HP.ToString())
             If i < Enemies.Count - 1 Then sb.Append(";")
         Next i
         sb.Append("|")
@@ -614,6 +819,24 @@ Public Class TankGame
         sb.Append(Winner.ToString()) : sb.Append("|")
         sb.Append(EnemiesSpawned.ToString()) : sb.Append(",")
         sb.Append(EnemiesKilled.ToString()) : sb.Append("|")
+
+        For i = 0 To PowerUps.Count - 1
+            Dim pu As PowerUpItem = PowerUps(i)
+            sb.Append(pu.X.ToString()) : sb.Append(",")
+            sb.Append(pu.Y.ToString()) : sb.Append(",")
+            sb.Append(CInt(pu.Kind).ToString())
+            If i < PowerUps.Count - 1 Then sb.Append(";")
+        Next i
+        sb.Append("|")
+
+        sb.Append(PlayerWeaponLevel(0).ToString()) : sb.Append(",")
+        sb.Append(PlayerWeaponLevel(1).ToString()) : sb.Append(",")
+        sb.Append(PlayerShieldTicks(0).ToString()) : sb.Append(",")
+        sb.Append(PlayerShieldTicks(1).ToString()) : sb.Append("|")
+
+        sb.Append(BaseShieldTicksLeft.ToString()) : sb.Append(",")
+        sb.Append(EnemyFreezeTicks.ToString()) : sb.Append("|")
+
         sb.Append(LastLog.Replace("|", " ").Replace(Chr(13), " ").Replace(Chr(10), " "))
 
         Return sb.ToString()
@@ -651,8 +874,8 @@ Public Class TankGame
         End If
 
         Bullets.Clear()
-        PlayerBulletActive(0) = False
-        PlayerBulletActive(1) = False
+        PlayerBulletCount(0) = 0
+        PlayerBulletCount(1) = 0
         If parts(3).Length > 0 Then
             For Each entry As String In parts(3).Split(";"c)
                 If entry.Length = 0 Then Continue For
@@ -664,8 +887,8 @@ Public Class TankGame
                     Integer.TryParse(bp(3), b.Owner)
                     b.EnemyIndex = -1
                     Bullets.Add(b)
-                    If b.Owner = 0 Then PlayerBulletActive(0) = True
-                    If b.Owner = 1 Then PlayerBulletActive(1) = True
+                    If b.Owner = 0 Then PlayerBulletCount(0) += 1
+                    If b.Owner = 1 Then PlayerBulletCount(1) += 1
                 End If
             Next
         End If
@@ -680,6 +903,13 @@ Public Class TankGame
                     Integer.TryParse(ep(0), e.X) : Integer.TryParse(ep(1), e.Y)
                     Dim ed As Integer = 0 : Integer.TryParse(ep(2), ed) : e.Dir = CType(ed, Direction)
                     e.Alive = (ep(3) = "1")
+                    If ep.Length >= 6 Then
+                        Integer.TryParse(ep(4), e.BossTier)
+                        Integer.TryParse(ep(5), e.HP)
+                    Else
+                        e.BossTier = 0
+                        e.HP = 1
+                    End If
                     Enemies.Add(e)
                 End If
             Next
@@ -710,7 +940,40 @@ Public Class TankGame
             End If
         End If
 
-        If parts.Length >= 10 Then LastLog = parts(9)
+        PowerUps.Clear()
+        If parts.Length >= 10 AndAlso parts(9).Length > 0 Then
+            For Each entry As String In parts(9).Split(";"c)
+                If entry.Length = 0 Then Continue For
+                Dim pp As String() = entry.Split(","c)
+                If pp.Length >= 3 Then
+                    Dim item As New PowerUpItem()
+                    Integer.TryParse(pp(0), item.X) : Integer.TryParse(pp(1), item.Y)
+                    Dim pk As Integer = 0 : Integer.TryParse(pp(2), pk) : item.Kind = CType(pk, PowerUpType)
+                    item.TTL = POWERUP_TTL
+                    PowerUps.Add(item)
+                End If
+            Next
+        End If
+
+        If parts.Length >= 11 Then
+            Dim wp As String() = parts(10).Split(","c)
+            If wp.Length >= 4 Then
+                Integer.TryParse(wp(0), PlayerWeaponLevel(0))
+                Integer.TryParse(wp(1), PlayerWeaponLevel(1))
+                Integer.TryParse(wp(2), PlayerShieldTicks(0))
+                Integer.TryParse(wp(3), PlayerShieldTicks(1))
+            End If
+        End If
+
+        If parts.Length >= 12 Then
+            Dim sp As String() = parts(11).Split(","c)
+            If sp.Length >= 2 Then
+                Integer.TryParse(sp(0), BaseShieldTicksLeft)
+                Integer.TryParse(sp(1), EnemyFreezeTicks)
+            End If
+        End If
+
+        If parts.Length >= 13 Then LastLog = parts(12)
     End Sub
 
 End Class

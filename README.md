@@ -1,7 +1,7 @@
 # Tank 1990 Online
 
 <p align="center">
-  <img src="GameTank1990-Logo" width="800">
+  <img src="GameTank1990-Logo.png" width="800">
 </p>
 
 
